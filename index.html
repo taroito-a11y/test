@@ -1,19 +1,44 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
-  <script src="https://cdn.jsdelivr.net/pyodide/v0.23.4/full/pyodide.js"></script>
+  <meta charset="UTF-8">
+  <title>Python in Browser (Pyodide)</title>
 </head>
 <body>
 
-<button onclick="run()">実行</button>
-<pre id="out"></pre>
+<h1>Pythonをブラウザで実行</h1>
 
+<input id="name" placeholder="名前を入力">
+<button onclick="run()">実行</button>
+
+<pre id="result"></pre>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.23.4/full/pyodide.js"></script>
 <script>
-async function run() {
-  const pyodide = await loadPyodide();
-  const result = pyodide.runPython("print('Hello Pyodide')");
-  document.getElementById("out").textContent = result ?? "";
+let pyodideReady = false;
+let pyodide;
+
+async function init() {
+  pyodide = await loadPyodide();
+  pyodideReady = true;
 }
+
+async function run() {
+  if (!pyodideReady) {
+    document.getElementById("result").textContent = "Pythonを読み込み中です… 少し待ってください";
+    return;
+  }
+
+  const name = document.getElementById("name").value;
+  const code = `
+name = "${name}"
+f"こんにちは、{name} さん"
+`;
+  const result = pyodide.runPython(code);
+  document.getElementById("result").textContent = result;
+}
+
+init();
 </script>
 
 </body>
