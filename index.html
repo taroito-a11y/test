@@ -1,34 +1,20 @@
 <!DOCTYPE html>
-<html lang="ja">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <title>PyScript GitHub Pages</title>
-
-  <link rel="stylesheet" href="https://pyscript.net/releases/2023.11.1/core.css">
-  <script type="module" src="https://pyscript.net/releases/2023.11.1/core.js"></script>
-
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.23.4/full/pyodide.js"></script>
 </head>
 <body>
 
-<h1>Python をブラウザで実行</h1>
+<button onclick="run()">実行</button>
+<pre id="out"></pre>
 
-<input id="name" placeholder="名前を入力">
-<button id="btn">実行</button>
-
-<p id="result"></p>
-
-<py-script>
-from js import document, window
-
-def setup():
-    def on_click(event):
-        name = document.getElementById("name").value
-        document.getElementById("result").innerText = f"こんにちは、{name} さん"
-
-    document.getElementById("btn").addEventListener("click", on_click)
-
-window.addEventListener("load", setup)
-</py-script>
+<script>
+async function run() {
+  const pyodide = await loadPyodide();
+  const result = pyodide.runPython("print('Hello Pyodide')");
+  document.getElementById("out").textContent = result ?? "";
+}
+</script>
 
 </body>
 </html>
