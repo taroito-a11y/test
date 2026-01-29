@@ -21,7 +21,7 @@ if st.button("検索") and q:
     with st.spinner("AIに接続中..."):
         try:
             # メインのモデル設定（まずはこれを試す）
-            target_model = 'gemini-1.5-flash'
+            target_model = 'models/gemini-2.0-flash'
             model = genai.GenerativeModel(target_model)
             
             prompt = f"""
