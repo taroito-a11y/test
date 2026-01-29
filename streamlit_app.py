@@ -26,7 +26,7 @@ if st.button("検索") and q:
         try:
             # Geminiにリクエスト
             response = client.models.generate_content(
-                model="gemini-2.0-flash",
+                model="gemini-1.5-flash",
                 contents=f"""
                 以下の文章から対象の地域を特定し、その周辺の店舗【5件のみ】厳選してJSONで出力してください。
                 出力形式は必ず以下のキーを持つJSONにしてください。
