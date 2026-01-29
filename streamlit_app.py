@@ -1,35 +1,34 @@
 import streamlit as st
 from google import genai
-from google.genai import types
-import urllib.parse
 import json
+import urllib.parse
 
-st.title("📍 店舗検索アプリ")
+# ページ設定
+st.set_page_config(page_title="店舗検索アプリ", page_icon="📍")
+st.title("📍 AI店舗検索")
 
-# 1. APIキーをSecretsから取得（直書きを廃止）
-# 注意: ここで "GEMINI_API_KEY" という名前で呼び出しているので、
-# Streamlit CloudのSecrets設定画面でも同じ名前で保存してください。
+# 1. APIキーの読み込み
 try:
+    # Streamlit Cloudの Secrets から取得
     API_KEY = st.secrets["GEMINI_API_KEY"]
-except KeyError:
-    st.error("APIキーが設定されていません。Streamlit CloudのSettings > Secrets に 'GEMINI_API_KEY' を登録してください。")
+    client = genai.Client(api_key=API_KEY)
+except Exception:
+    st.error("APIキーが設定されていません。Secretsに 'GEMINI_API_KEY' を登録してください。")
     st.stop()
 
-# クライアントの初期化
-client = genai.Client(api_key=API_KEY)
-
 # 2. ユーザー入力
-q = st.text_input("例：早稲田大学の近くのスーパー", key="query")
+q = st.text_input("例：早稲田大学の近くのスーパー", placeholder="場所や店名を入力...")
 
 if st.button("検索") and q:
-    with st.spinner("Geminiが検索中..."):
+    with st.spinner("AIが店舗を探しています..."):
         try:
-            # Geminiにリクエスト
+            # モデル名は最も安定している 'gemini-1.5-flash' を使用
+            # クォータエラーを避けるため、一旦Google Mapsツールを外してAIの知識で回答させます
             response = client.models.generate_content(
                 model="gemini-1.5-flash",
                 contents=f"""
                 以下の文章から対象の地域を特定し、その周辺の店舗【5件のみ】厳選してJSONで出力してください。
-                出力形式は必ず以下のキーを持つJSONにしてください。
+                出力形式は必ず以下のキーを持つJSON配列にしてください。余計な文章は一切含めないでください。
                 {{
                   "detected_location": "地域名",
                   "shops": [
@@ -37,30 +36,29 @@ if st.button("検索") and q:
                   ]
                 }}
                 文章：{q}
-                """,
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_maps=types.GoogleMaps())]
-                )
+                """
             )
 
-            # JSONテキストの抽出（Markdownの装飾を消す）
+            # JSONの整形（Markdownタグが含まれる場合を考慮）
             res_text = response.text.replace('```json', '').replace('```', '').strip()
             data = json.loads(res_text)
             
             location = data.get("detected_location", "不明な場所")
             st.success(f"「{location}」周辺の検索結果です。")
 
-            # 3. 結果の表示と地図URLの生成
+            # 3. 結果の表示
             for shop in data.get("shops", []):
                 with st.expander(f"🏢 {shop['name']}"):
                     st.write(f"🌟 **理由:** {shop['reason']}")
                     
-                    # 地図URLの生成（検索クエリを作成）
+                    # Googleマップへのリンクを生成
                     search_query = f"{shop['name']} {location}"
                     map_url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(search_query)}"
                     
-                    st.link_button("Googleマップで見る", map_url)
+                    st.link_button("Googleマップを開く", map_url)
 
+        except json.JSONDecodeError:
+            st.error("AIからの回答を正しく解析できませんでした。もう一度お試しください。")
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
-            st.info("APIキーが正しいか、Google AI Studioで Gemini 2.0 Flash が使えるか確認してください。")
+            st.info("APIの制限にかかった可能性があります。1分ほど待ってから再度お試しください。")
