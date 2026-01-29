@@ -2,43 +2,67 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <title>Python in Browser (Pyodide)</title>
+  <title>Python in Browser - Complete</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 20px;
+    }
+    input, button {
+      font-size: 16px;
+      padding: 6px;
+      margin-right: 6px;
+    }
+    pre {
+      margin-top: 15px;
+      background: #f5f5f5;
+      padding: 10px;
+    }
+  </style>
 </head>
 <body>
 
-<h1>Pythonをブラウザで実行</h1>
+<h1>Pythonをブラウザで実行（Pyodide）</h1>
 
 <input id="name" placeholder="名前を入力">
-<button onclick="run()">実行</button>
+<button onclick="runPython()">実行</button>
 
-<pre id="result"></pre>
+<pre id="output">読み込み中…</pre>
 
+<!-- Pyodide -->
 <script src="https://cdn.jsdelivr.net/pyodide/v0.23.4/full/pyodide.js"></script>
 <script>
-let pyodideReady = false;
 let pyodide;
 
-async function init() {
+// Pyodide 初期化
+async function initPyodide() {
   pyodide = await loadPyodide();
-  pyodideReady = true;
+  document.getElementById("output").textContent =
+    "準備完了。名前を入力して「実行」を押してください。";
 }
+initPyodide();
 
-async function run() {
-  if (!pyodideReady) {
-    document.getElementById("result").textContent = "Pythonを読み込み中です… 少し待ってください";
+// ボタン押下時
+async function runPython() {
+  if (!pyodide) {
+    document.getElementById("output").textContent = "Pythonを読み込み中です…";
     return;
   }
 
   const name = document.getElementById("name").value;
-  const code = `
-name = "${name}"
-f"こんにちは、{name} さん"
-`;
-  const result = pyodide.runPython(code);
-  document.getElementById("result").textContent = result;
-}
 
-init();
+  const code = `
+def greet(name):
+    if not name:
+        return "名前を入力してください"
+    return f"こんにちは、{name} さん"
+
+greet("${name}")
+`;
+
+  const result = pyodide.runPython(code);
+  document.getElementById("output").textContent = result;
+}
 </script>
 
 </body>
