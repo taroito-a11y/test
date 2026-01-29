@@ -2,66 +2,26 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <title>Python in Browser - Complete</title>
-  <style>
-    body {
-      font-family: sans-serif;
-      padding: 20px;
-    }
-    input, button {
-      font-size: 16px;
-      padding: 6px;
-      margin-right: 6px;
-    }
-    pre {
-      margin-top: 15px;
-      background: #f5f5f5;
-      padding: 10px;
-    }
-  </style>
+  <title>店舗検索</title>
 </head>
 <body>
 
-<h1>Pythonをブラウザで実行（Pyodide）</h1>
+<input id="q" placeholder="例：早稲田大学の近くのスーパー">
+<button onclick="search()">検索</button>
 
-<input id="name" placeholder="名前を入力">
-<button onclick="runPython()">実行</button>
+<pre id="out"></pre>
 
-<pre id="output">読み込み中…</pre>
-
-<!-- Pyodide -->
-<script src="https://cdn.jsdelivr.net/pyodide/v0.23.4/full/pyodide.js"></script>
 <script>
-let pyodide;
-
-// Pyodide 初期化
-async function initPyodide() {
-  pyodide = await loadPyodide();
-  document.getElementById("output").textContent =
-    "準備完了。名前を入力して「実行」を押してください。";
-}
-initPyodide();
-
-// ボタン押下時
-async function runPython() {
-  if (!pyodide) {
-    document.getElementById("output").textContent = "Pythonを読み込み中です…";
-    return;
-  }
-
-  const name = document.getElementById("name").value;
-
-  const code = `
-def greet(name):
-    if not name:
-        return "名前を入力してください"
-    return f"こんにちは、{name} さん"
-
-greet("${name}")
-`;
-
-  const result = pyodide.runPython(code);
-  document.getElementById("output").textContent = result;
+async function search() {
+  const q = document.getElementById("q").value;
+  const res = await fetch("/search", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({query: q})
+  });
+  const data = await res.json();
+  document.getElementById("out").textContent =
+    JSON.stringify(data, null, 2);
 }
 </script>
 
