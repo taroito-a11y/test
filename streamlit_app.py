@@ -1,130 +1,220 @@
 import streamlit as st
 import google.generativeai as genai
-import json
+import requests
+import math
 import urllib.parse
 
 st.set_page_config(page_title="店舗検索アプリ", page_icon="📍")
-st.title("📍 AI店舗検索（距離・重視軸切替対応）")
+st.title("📍 実在店舗検索（Places連携 + AI要約）")
 
-# 1. APIキー設定
+# ===== Keys =====
 try:
-    API_KEY = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=API_KEY)
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=GEMINI_API_KEY)
 except Exception:
-    st.error("APIキー設定エラー: Secretsに 'GEMINI_API_KEY' が設定されていません。")
+    st.error("Secretsに 'GEMINI_API_KEY' が設定されていません。")
     st.stop()
 
-# 2. 入力
-q = st.text_input(
-    "検索地点・条件を入力",
-    placeholder="例：早稲田大学の近くで静かなカフェ"
-)
+try:
+    MAPS_API_KEY = st.secrets["GOOGLE_MAPS_API_KEY"]
+except Exception:
+    st.error("Secretsに 'GOOGLE_MAPS_API_KEY'（Google Maps PlatformのAPIキー）が設定されていません。")
+    st.stop()
+
+# ===== UI =====
+q = st.text_input("検索地点・条件を入力", placeholder="例：早稲田大学の近くのスーパー")
 
 col1, col2 = st.columns(2)
-
 with col1:
-    radius = st.radio("検索半径", options=["500m", "1km", "2km"], horizontal=True)
-
+    radius_label = st.radio("検索半径", ["500m", "1km", "2km"], horizontal=True)
 with col2:
-    priority = st.radio("重視するポイント", options=["近さ重視", "評価重視"], horizontal=True)
+    priority = st.radio("重視するポイント", ["近さ重視", "評価重視"], horizontal=True)
 
-st.caption("※ 距離は徒歩圏内を目安にAIが判断します（厳密な測距ではありません）")
-st.caption("※ 住所・評価・口コミ要約は参考情報です。正確な情報はGoogleマップ等でご確認ください。")
+radius_m = {"500m": 500, "1km": 1000, "2km": 2000}[radius_label]
 
-if st.button("検索") and q:
-    with st.spinner("AIが店舗を診断中..."):
-        try:
-            target_model = "models/gemini-2.0-flash"
-            model = genai.GenerativeModel(target_model)
+st.caption("※ 店舗名・住所・評価はGoogle Placesの実データです。AIは要約・理由のみ生成します。")
 
-            prompt = f"""
-以下の文章から検索の中心となる地域を特定してください。
+# ===== Helpers =====
+def geocode_address(text: str):
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {"address": text, "key": MAPS_API_KEY, "language": "ja"}
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("status") != "OK" or not data.get("results"):
+        return None
+    loc = data["results"][0]["geometry"]["location"]
+    formatted = data["results"][0].get("formatted_address", text)
+    return (loc["lat"], loc["lng"], formatted)
 
-その地域の【中心地点から半径 {radius} 以内（徒歩圏内）】にある店舗のみを対象に、
-条件に合う店舗を【5件のみ】厳選してください。
+def places_nearby(lat: float, lng: float, radius: int, keyword: str):
+    # Nearby Search: 実在店舗を半径で取得
+    url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+    params = {
+        "location": f"{lat},{lng}",
+        "radius": radius,
+        "keyword": keyword,
+        "key": MAPS_API_KEY,
+        "language": "ja",
+    }
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("status") not in ("OK", "ZERO_RESULTS"):
+        raise RuntimeError(f"Places API error: {data.get('status')} {data.get('error_message','')}")
+    return data.get("results", [])
 
-選定方針：
-- 今回は「{priority}」で並び替え・選定してください
-- 半径を超えると判断される店舗は含めないでください
+def place_details(place_id: str):
+    # 住所を確実に取るためDetails
+    url = "https://maps.googleapis.com/maps/api/place/details/json"
+    params = {
+        "place_id": place_id,
+        "fields": "name,formatted_address,rating,user_ratings_total,url,geometry",
+        "key": MAPS_API_KEY,
+        "language": "ja",
+    }
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("status") != "OK":
+        raise RuntimeError(f"Place Details error: {data.get('status')} {data.get('error_message','')}")
+    return data["result"]
 
-必ず JSON 形式で出力してください。
-マークダウンや説明文は不要です。
+def haversine_m(lat1, lon1, lat2, lon2):
+    R = 6371000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dl/2)**2
+    return 2 * R * math.asin(math.sqrt(a))
 
-JSON形式：
+def ai_enrich(model, shops, user_query, center_label):
+    # Geminiには「与えた店情報だけ」を使わせる（幻覚防止）
+    # 口コミの実テキストはPlaces無料枠だと取りづらいので、ここでは「特徴要約」を生成
+    # （必要なら別途、レビュー取得可能なAPI/スクレイピングは規約的に注意が必要）
+    prompt = f"""
+あなたは店舗選定アシスタントです。
+次の「候補店舗リスト（実在データ）」以外の店舗名・住所は絶対に出力しないでください。
+各店舗に対し「おすすめ理由」と「推定される口コミ傾向の短い要約（一般的な傾向）」を日本語で付けてください。
+ユーザー要望: {user_query}
+中心: {center_label}
+
+出力はJSONのみ:
 {{
-  "detected_location": "地域名",
   "shops": [
     {{
-      "name": "店名",
-      "address": "住所（可能な範囲で具体的に。番地やビル名まで分かれば含める）",
-      "rating": 4.2,
-      "reviews": "口コミの要約（良い点・悪い点を簡潔に）",
-      "reason": "この店をおすすめする理由（距離や評価に言及）"
+      "place_id": "...",
+      "reason": "...",
+      "reviews": "..."
     }}
   ]
 }}
 
-※ rating は5点満点
-※ reviews は一般的な口コミ傾向を要約したもの
-※ address が不確かな場合は、最寄り駅や丁目レベルまでに留め、推測で番地を作らない
-
-文章：
-{q}
+候補店舗リスト:
+{[
+    {
+        "place_id": s["place_id"],
+        "name": s["name"],
+        "address": s["address"],
+        "rating": s.get("rating"),
+        "user_ratings_total": s.get("user_ratings_total"),
+        "distance_m": s["distance_m"],
+        "maps_url": s["maps_url"],
+    } for s in shops
+]}
 """
+    resp = model.generate_content(prompt)
+    text = resp.text.replace("```json", "").replace("```", "").strip()
 
-            response = model.generate_content(prompt)
+    import json
+    data = json.loads(text)
+    by_id = {x["place_id"]: x for x in data.get("shops", [])}
+    for s in shops:
+        extra = by_id.get(s["place_id"], {})
+        s["reason"] = extra.get("reason", "")
+        s["reviews"] = extra.get("reviews", "")
+    return shops
 
-            text_data = (
-                response.text
-                .replace("```json", "")
-                .replace("```", "")
-                .strip()
-            )
+# ===== Main =====
+if st.button("検索") and q:
+    try:
+        geo = geocode_address(q)
+        if not geo:
+            st.error("地点の特定に失敗しました。もう少し具体的に入力してください（例：駅名・施設名＋地域）。")
+            st.stop()
 
-            data = json.loads(text_data)
+        lat, lng, center_label = geo
+        st.success(f"検索中心: {center_label}（半径 {radius_label}）")
 
-            location = data.get("detected_location", "指定地点")
-            st.success(f"「{location}」周辺（半径 {radius}・{priority}）の結果です")
+        # Places: まず候補取得
+        raw = places_nearby(lat, lng, radius_m, q)
 
-            for shop in data.get("shops", []):
-                name = shop.get("name", "")
-                address = shop.get("address", "")
-                rating = shop.get("rating", "")
-                reviews = shop.get("reviews", "")
-                reason = shop.get("reason", "")
+        if not raw:
+            st.warning("該当する店舗が見つかりませんでした。キーワードを変えて試してください。")
+            st.stop()
 
-                title = f"🏢 {name}"
-                if rating != "":
-                    title += f" ⭐ {rating} / 5"
+        # Detailsで住所など確定
+        shops = []
+        for item in raw[:10]:  # 取りすぎ防止（課金＆速度対策）
+            pid = item.get("place_id")
+            if not pid:
+                continue
+            d = place_details(pid)
+            gloc = d["geometry"]["location"]
+            dist = haversine_m(lat, lng, gloc["lat"], gloc["lng"])
+            shops.append({
+                "place_id": pid,
+                "name": d.get("name", ""),
+                "address": d.get("formatted_address", ""),
+                "rating": d.get("rating", None),
+                "user_ratings_total": d.get("user_ratings_total", None),
+                "maps_url": d.get("url", ""),
+                "distance_m": int(dist),
+            })
 
-                with st.expander(title):
-                    if address:
-                        st.write("📍 **住所**")
-                        st.write(address)
+        # 並び替え
+        if priority == "近さ重視":
+            shops.sort(key=lambda x: x["distance_m"])
+        else:
+            # ratingがない店は後ろへ
+            shops.sort(key=lambda x: (-(x["rating"] or -1), x["distance_m"]))
 
-                    if reviews:
-                        st.write("🗣️ **口コミ要約**")
-                        st.write(reviews)
+        # 上位5件
+        shops = shops[:5]
 
-                    if reason:
-                        st.write("✅ **おすすめ理由**")
-                        st.write(reason)
+        # Geminiで要約付与（幻覚対策：候補リスト限定）
+        model = genai.GenerativeModel("models/gemini-2.0-flash")
+        shops = ai_enrich(model, shops, q, center_label)
 
-                    # Googleマップ検索は location を足さず、店名＋住所（あれば）で検索精度を上げる
-                    query = name if not address else f"{name} {address}"
+        # 表示
+        for s in shops:
+            rating = s["rating"]
+            rating_text = f"{rating} / 5" if rating is not None else "評価なし"
+            sub = f"⭐ {rating_text}・🧭 {s['distance_m']}m"
+
+            with st.expander(f"🏢 {s['name']}（{sub}）"):
+                st.write("📍 **住所**")
+                st.write(s["address"])
+
+                if s.get("user_ratings_total") is not None:
+                    st.write("👥 **評価件数**")
+                    st.write(str(s["user_ratings_total"]))
+
+                if s.get("reviews"):
+                    st.write("🗣️ **口コミ傾向（AI要約）**")
+                    st.write(s["reviews"])
+
+                if s.get("reason"):
+                    st.write("✅ **おすすめ理由（AI）**")
+                    st.write(s["reason"])
+
+                if s.get("maps_url"):
+                    st.link_button("Googleマップで開く", s["maps_url"])
+                else:
+                    # 保険：URLが無い場合は店名+住所で検索
+                    query = f"{s['name']} {s['address']}".strip()
                     map_url = "https://www.google.com/maps/search/?api=1&query=" + urllib.parse.quote(query)
-                    st.link_button("Googleマップで見る", map_url)
+                    st.link_button("Googleマップで検索", map_url)
 
-        except Exception as e:
-            st.error(f"エラーが発生しました: {e}")
-
-            if "404" in str(e) or "not found" in str(e):
-                st.warning("⚠️ 利用可能なモデル一覧を表示します")
-                try:
-                    models = []
-                    for m in genai.list_models():
-                        if "generateContent" in m.supported_generation_methods:
-                            models.append(m.name)
-                    st.code("\n".join(models))
-                except Exception as list_error:
-                    st.error(f"モデル一覧の取得に失敗しました: {list_error}")
+    except Exception as e:
+        st.error(f"エラーが発生しました: {e}")
