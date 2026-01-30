@@ -6,9 +6,7 @@ import urllib.parse
 st.set_page_config(page_title="店舗検索アプリ", page_icon="📍")
 st.title("📍 AI店舗検索（距離・重視軸切替対応）")
 
-# =========================
-# APIキー設定
-# =========================
+# 1. APIキー設定
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=API_KEY)
@@ -16,9 +14,7 @@ except Exception:
     st.error("APIキー設定エラー: Secretsに 'GEMINI_API_KEY' が設定されていません。")
     st.stop()
 
-# =========================
-# UI入力
-# =========================
+# 2. 入力
 q = st.text_input(
     "検索地点・条件を入力",
     placeholder="例：早稲田大学の近くで静かなカフェ"
@@ -27,24 +23,14 @@ q = st.text_input(
 col1, col2 = st.columns(2)
 
 with col1:
-    radius = st.radio(
-        "検索半径",
-        options=["500m", "1km", "2km"],
-        horizontal=True
-    )
+    radius = st.radio("検索半径", options=["500m", "1km", "2km"], horizontal=True)
 
 with col2:
-    priority = st.radio(
-        "重視するポイント",
-        options=["近さ重視", "評価重視"],
-        horizontal=True
-    )
+    priority = st.radio("重視するポイント", options=["近さ重視", "評価重視"], horizontal=True)
 
 st.caption("※ 距離は徒歩圏内を目安にAIが判断します（厳密な測距ではありません）")
+st.caption("※ 住所・評価・口コミ要約は参考情報です。正確な情報はGoogleマップ等でご確認ください。")
 
-# =========================
-# 検索処理
-# =========================
 if st.button("検索") and q:
     with st.spinner("AIが店舗を診断中..."):
         try:
@@ -70,6 +56,7 @@ JSON形式：
   "shops": [
     {{
       "name": "店名",
+      "address": "住所（可能な範囲で具体的に。番地やビル名まで分かれば含める）",
       "rating": 4.2,
       "reviews": "口コミの要約（良い点・悪い点を簡潔に）",
       "reason": "この店をおすすめする理由（距離や評価に言及）"
@@ -79,6 +66,7 @@ JSON形式：
 
 ※ rating は5点満点
 ※ reviews は一般的な口コミ傾向を要約したもの
+※ address が不確かな場合は、最寄り駅や丁目レベルまでに留め、推測で番地を作らない
 
 文章：
 {q}
@@ -99,17 +87,32 @@ JSON形式：
             st.success(f"「{location}」周辺（半径 {radius}・{priority}）の結果です")
 
             for shop in data.get("shops", []):
-                with st.expander(f"🏢 {shop['name']} ⭐ {shop['rating']} / 5"):
-                    st.write("🗣️ **口コミ要約**")
-                    st.write(shop["reviews"])
+                name = shop.get("name", "")
+                address = shop.get("address", "")
+                rating = shop.get("rating", "")
+                reviews = shop.get("reviews", "")
+                reason = shop.get("reason", "")
 
-                    st.write("✅ **おすすめ理由**")
-                    st.write(shop["reason"])
+                title = f"🏢 {name}"
+                if rating != "":
+                    title += f" ⭐ {rating} / 5"
 
-                    map_url = (
-                        "https://www.google.com/maps/search/?api=1&query="
-                        + urllib.parse.quote(shop["name"] + " " + location)
-                    )
+                with st.expander(title):
+                    if address:
+                        st.write("📍 **住所**")
+                        st.write(address)
+
+                    if reviews:
+                        st.write("🗣️ **口コミ要約**")
+                        st.write(reviews)
+
+                    if reason:
+                        st.write("✅ **おすすめ理由**")
+                        st.write(reason)
+
+                    # Googleマップ検索は location を足さず、店名＋住所（あれば）で検索精度を上げる
+                    query = name if not address else f"{name} {address}"
+                    map_url = "https://www.google.com/maps/search/?api=1&query=" + urllib.parse.quote(query)
                     st.link_button("Googleマップで見る", map_url)
 
         except Exception as e:
