@@ -8,7 +8,7 @@ import google.generativeai as genai
 
 
 st.set_page_config(page_title="店舗検索アプリ", page_icon="📍")
-st.title("📍 実在店舗検索（Places連携 + AI要約）")
+st.title("📍 実在店舗検索（自由記述 → 中心/キーワード自動抽出）")
 
 
 # =========================
@@ -31,14 +31,9 @@ except Exception:
 # =========================
 # UI
 # =========================
-center = st.text_input(
-    "検索中心（地名・駅名・施設名）",
-    placeholder="例：早稲田大学 / 新宿駅 / 東京駅"
-)
-
-keyword = st.text_input(
-    "探したいお店（キーワード）",
-    placeholder="例：スーパー / カフェ 静か / ラーメン"
+q = st.text_input(
+    "自由に入力（場所＋探したい店＋条件）",
+    placeholder="例：早稲田大学の近くで静かなカフェ。評価が高いところがいい"
 )
 
 col1, col2 = st.columns(2)
@@ -49,8 +44,7 @@ with col2:
 
 radius_m = {"500m": 500, "1km": 1000, "2km": 2000}[radius_label]
 
-st.caption("※ 店舗名・住所・評価・距離はGoogle Placesの実データです。AIは要約・理由のみ生成します。")
-st.caption("※ 口コミ本文の取得・表示は行いません（規約・フィールド制限に配慮し、傾向のみAIで要約します）。")
+st.caption("※ 店舗名・住所・評価・距離はGoogle Placesの実データです。AIは地点/キーワード抽出・要約・理由のみ生成します。")
 
 
 # =========================
@@ -130,7 +124,43 @@ def haversine_m(lat1, lon1, lat2, lon2):
 # =========================
 # Helpers (Gemini)
 # =========================
-def ai_enrich_shops(shops, user_keyword, center_label, priority_label, radius_label_str):
+def ai_extract_search_params(user_text: str, ui_priority: str, ui_radius_label: str):
+    model = genai.GenerativeModel("models/gemini-2.0-flash")
+    prompt = f"""
+あなたは検索クエリ分解器です。
+ユーザーの自由記述から「検索中心（Geocodingに投げられる地名・駅名・施設名）」と
+「Placesのkeyword（店種/条件のキーワード）」を抽出してください。
+
+制約：
+- 出力はJSONのみ（マークダウン禁止）
+- center は、可能な限り固有名詞を含む短い文字列（例：早稲田大学、新宿駅、渋谷区役所）
+- keyword は、Placesのkeywordに適した短い文字列（例：カフェ 静か、スーパー、ラーメン）
+- もし場所が不明確なら、center を空文字にせず「ユーザー入力から推定できる最も中心に近い語」を入れてください
+- ui_priority / ui_radius は参考情報（中心/keyword抽出の補助）として扱って良い
+
+追加情報：
+- ui_priority: {ui_priority}
+- ui_radius: {ui_radius_label}
+
+出力JSON形式：
+{{
+  "center": "…",
+  "keyword": "…",
+  "constraints": {{
+    "must": ["…", "…"],
+    "nice_to_have": ["…"]
+  }}
+}}
+
+ユーザー入力：
+{user_text}
+"""
+    resp = model.generate_content(prompt)
+    text = resp.text.replace("```json", "").replace("```", "").strip()
+    return json.loads(text)
+
+
+def ai_enrich_shops(shops, user_text, extracted, center_label, priority_label, radius_label_str):
     model = genai.GenerativeModel("models/gemini-2.0-flash")
 
     candidates = [
@@ -153,8 +183,15 @@ def ai_enrich_shops(shops, user_keyword, center_label, priority_label, radius_la
 - 出力は候補の place_id に対する補足情報（reason / reviews）だけを返してください。
 - マークダウンや説明文は不要、JSONのみ。
 
-ユーザーの探しているもの: {user_keyword}
-検索中心: {center_label}
+ユーザー入力：
+{user_text}
+
+抽出結果：
+center={extracted.get("center","")}
+keyword={extracted.get("keyword","")}
+constraints={json.dumps(extracted.get("constraints", {}), ensure_ascii=False)}
+
+検索中心（正規化）: {center_label}
 半径: {radius_label_str}
 重視軸: {priority_label}
 
@@ -192,19 +229,39 @@ def ai_enrich_shops(shops, user_keyword, center_label, priority_label, radius_la
 # =========================
 # Main
 # =========================
-if st.button("検索") and center and keyword:
+if st.button("検索") and q:
     try:
-        geo = geocode_address(center)
+        with st.spinner("入力内容を解析中..."):
+            extracted = ai_extract_search_params(q, priority, radius_label)
+
+        st.info("AI抽出結果")
+        st.write(
+            {
+                "center": extracted.get("center", ""),
+                "keyword": extracted.get("keyword", ""),
+                "constraints": extracted.get("constraints", {}),
+            }
+        )
+
+        center_text = (extracted.get("center") or "").strip()
+        keyword_text = (extracted.get("keyword") or "").strip()
+
+        if not center_text or not keyword_text:
+            st.error("検索に必要な情報（中心/キーワード）の抽出に失敗しました。入力を少し具体化してください。")
+            st.stop()
+
+        geo = geocode_address(center_text)
         if not geo:
             st.stop()
 
         lat, lng, center_label = geo
         st.success(f"検索中心: {center_label}（半径 {radius_label}）")
 
-        raw = places_nearby(lat, lng, radius_m, keyword)
+        with st.spinner("実在店舗を検索中（Google Places）..."):
+            raw = places_nearby(lat, lng, radius_m, keyword_text)
 
         if not raw:
-            st.warning("該当する店舗が見つかりませんでした。キーワードを変えて試してください。")
+            st.warning("該当する店舗が見つかりませんでした。別の言い方（例：喫茶店/コーヒー/ベーカリー）も試してください。")
             st.stop()
 
         shops = []
@@ -238,13 +295,15 @@ if st.button("検索") and center and keyword:
 
         shops = shops[:5]
 
-        shops = ai_enrich_shops(
-            shops=shops,
-            user_keyword=keyword,
-            center_label=center_label,
-            priority_label=priority,
-            radius_label_str=radius_label,
-        )
+        with st.spinner("AIが理由・口コミ傾向を生成中..."):
+            shops = ai_enrich_shops(
+                shops=shops,
+                user_text=q,
+                extracted=extracted,
+                center_label=center_label,
+                priority_label=priority,
+                radius_label_str=radius_label,
+            )
 
         for s in shops:
             rating = s.get("rating")
@@ -276,6 +335,3 @@ if st.button("検索") and center and keyword:
 
     except Exception as e:
         st.error(f"エラーが発生しました: {e}")
-
-elif st.button("検索"):
-    st.warning("「検索中心」と「キーワード」を入力してください。")
