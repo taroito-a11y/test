@@ -7,6 +7,9 @@ import streamlit as st
 import google.generativeai as genai
 
 
+GEMINI_MODEL = "models/gemini-3.8-flash"
+
+
 st.set_page_config(page_title="店舗検索アプリ", page_icon="📍")
 st.title("📍 生成AIプレイス検索")
 
@@ -125,7 +128,7 @@ def haversine_m(lat1, lon1, lat2, lon2):
 # Helpers (Gemini)
 # =========================
 def ai_extract_search_params(user_text: str, ui_priority: str, ui_radius_label: str):
-    model = genai.GenerativeModel("models/gemini-2.0-flash")
+    model = genai.GenerativeModel(GEMINI_MODEL)
     prompt = f"""
 あなたは検索クエリ分解器です。
 ユーザーの自由記述から「検索中心（Geocodingに投げられる地名・駅名・施設名）」と
@@ -161,7 +164,7 @@ def ai_extract_search_params(user_text: str, ui_priority: str, ui_radius_label: 
 
 
 def ai_enrich_shops(shops, user_text, extracted, center_label, priority_label, radius_label_str):
-    model = genai.GenerativeModel("models/gemini-2.0-flash")
+    model = genai.GenerativeModel(GEMINI_MODEL)
 
     candidates = [
         {
