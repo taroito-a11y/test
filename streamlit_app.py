@@ -209,6 +209,14 @@ def normalize_nearby_place(item: dict, center_lat: float, center_lng: float):
         "https://www.google.com/maps/search/?api=1"
         f"&query={map_query}&query_place_id={urllib.parse.quote(place_id)}"
     )
+    origin = urllib.parse.quote(f"{center_lat},{center_lng}")
+    directions_url = (
+        "https://www.google.com/maps/dir/?api=1"
+        f"&origin={origin}"
+        f"&destination={map_query}"
+        f"&destination_place_id={urllib.parse.quote(place_id)}"
+        "&travelmode=walking"
+    )
     return {
         "place_id": place_id,
         "name": name,
@@ -216,6 +224,7 @@ def normalize_nearby_place(item: dict, center_lat: float, center_lng: float):
         "rating": item.get("rating"),
         "user_ratings_total": item.get("user_ratings_total"),
         "maps_url": maps_url,
+        "directions_url": directions_url,
         "distance_m": distance_m,
     }
 
@@ -426,7 +435,10 @@ if feature == "引っ越し周辺環境チェック":
                             )
                             if place["address"]:
                                 st.caption(place["address"])
-                            st.markdown(f"[Googleマップで開く]({place['maps_url']})")
+                            st.markdown(
+                                f"[徒歩ルートを開く]({place['directions_url']})"
+                                f" ・ [施設ページを開く]({place['maps_url']})"
+                            )
 
                 if environment_errors:
                     st.warning(
@@ -533,8 +545,12 @@ if st.button("検索") and q:
                     st.write("✅ **おすすめ理由（AI）**")
                     st.write(s["reason"])
 
-                if s.get("maps_url"):
-                    st.link_button("Googleマップで開く", s["maps_url"])
+                if s.get("directions_url"):
+                    st.link_button(
+                        "徒歩ルートをGoogleマップで開く",
+                        s["directions_url"],
+                    )
+                    st.link_button("施設ページを開く", s["maps_url"])
                 else:
                     query = f"{s.get('name','')} {s.get('address','')}".strip()
                     map_url = "https://www.google.com/maps/search/?api=1&query=" + urllib.parse.quote(query)
