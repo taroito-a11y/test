@@ -1,17 +1,66 @@
 import math
 import json
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import streamlit as st
-import google.generativeai as genai
+from google import genai
 
 
-GEMINI_MODEL = "models/gemini-3.8-flash"
+GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_TIMEOUT_SECONDS = 45
+
+SEARCH_PARAMS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "center": {"type": "string"},
+        "keyword": {"type": "string"},
+        "constraints": {
+            "type": "object",
+            "properties": {
+                "must": {"type": "array", "items": {"type": "string"}},
+                "nice_to_have": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["must", "nice_to_have"],
+        },
+    },
+    "required": ["center", "keyword", "constraints"],
+}
+
+SHOP_ENRICHMENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "shops": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "place_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "reviews": {"type": "string"},
+                },
+                "required": ["place_id", "reason", "reviews"],
+            },
+        }
+    },
+    "required": ["shops"],
+}
+
+ENVIRONMENT_CATEGORIES = [
+    {"label": "駅", "icon": "🚉", "keyword": "駅", "place_type": "train_station"},
+    {"label": "スーパー", "icon": "🛒", "keyword": "", "place_type": "supermarket"},
+    {"label": "コンビニ", "icon": "🏪", "keyword": "", "place_type": "convenience_store"},
+    {"label": "薬局", "icon": "💊", "keyword": "", "place_type": "pharmacy"},
+    {"label": "病院・クリニック", "icon": "🏥", "keyword": "病院 クリニック", "place_type": ""},
+    {"label": "保育園・学校", "icon": "🏫", "keyword": "保育園 学校", "place_type": ""},
+    {"label": "公園", "icon": "🌳", "keyword": "", "place_type": "park"},
+    {"label": "警察", "icon": "👮", "keyword": "", "place_type": "police"},
+]
 
 
-st.set_page_config(page_title="店舗検索アプリ", page_icon="📍")
-st.title("📍 生成AIプレイス検索")
+st.set_page_config(page_title="周辺検索アプリ", page_icon="📍")
+st.title("📍 周辺検索アプリ")
 
 
 # =========================
@@ -19,10 +68,9 @@ st.title("📍 生成AIプレイス検索")
 # =========================
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 except Exception:
-    st.error("Secretsに 'GEMINI_API_KEY' が設定されていません。")
-    st.stop()
+    gemini_client = None
 
 try:
     MAPS_API_KEY = st.secrets["GOOGLE_MAPS_API_KEY"]
@@ -34,20 +82,43 @@ except Exception:
 # =========================
 # UI
 # =========================
-q = st.text_input(
-    "自由に入力（場所＋探したい店＋条件）",
-    placeholder="例：早稲田大学の近くで静かなカフェ。評価が高いところがいい"
+feature = st.radio(
+    "利用する機能",
+    ["お店検索", "引っ越し周辺環境チェック"],
+    horizontal=True,
 )
 
-col1, col2 = st.columns(2)
-with col1:
-    radius_label = st.radio("検索半径", ["500m", "1km", "2km"], horizontal=True)
-with col2:
-    priority = st.radio("重視するポイント", ["近さ重視", "評価重視"], horizontal=True)
+if feature == "お店検索":
+    q = st.text_input(
+        "自由に入力（場所＋探したい店＋条件）",
+        placeholder="例：早稲田大学の近くで静かなカフェ。評価が高いところがいい",
+    )
 
-radius_m = {"500m": 500, "1km": 1000, "2km": 2000}[radius_label]
+    col1, col2 = st.columns(2)
+    with col1:
+        radius_label = st.radio("検索半径", ["500m", "1km", "2km"], horizontal=True)
+    with col2:
+        priority = st.radio("重視するポイント", ["近さ重視", "評価重視"], horizontal=True)
 
-st.caption("※ 店舗名・住所・評価・距離はGoogle Placesの実データです。AIは地点/キーワード抽出・要約・理由のみ生成します。")
+    radius_m = {"500m": 500, "1km": 1000, "2km": 2000}[radius_label]
+    st.caption("※ 店舗名・住所・評価・距離はGoogle Placesの実データです。AIは地点/キーワード抽出・要約・理由のみ生成します。")
+else:
+    residence_name = st.text_input(
+        "マンション名",
+        placeholder="例：〇〇マンション 新宿区（市区町村まで入れると正確です）",
+    )
+    environment_radius_label = st.radio(
+        "調査半径",
+        ["500m", "1km", "2km"],
+        index=1,
+        horizontal=True,
+    )
+    environment_radius_m = {
+        "500m": 500,
+        "1km": 1000,
+        "2km": 2000,
+    }[environment_radius_label]
+    st.caption("※ Google Placesから周辺施設を取得します。この機能はGemini APIを使用しません。")
 
 
 # =========================
@@ -62,7 +133,8 @@ def geocode_address(text: str):
         "region": "jp",
     }
     r = requests.get(url, params=params, timeout=20)
-    r.raise_for_status()
+    if not r.ok:
+        raise RuntimeError(f"Geocoding HTTPエラー: {r.status_code}")
     data = r.json()
 
     status = data.get("status")
@@ -76,17 +148,28 @@ def geocode_address(text: str):
     return (loc["lat"], loc["lng"], formatted)
 
 
-def places_nearby(lat: float, lng: float, radius: int, keyword_text: str):
+def places_nearby(
+    lat: float,
+    lng: float,
+    radius: int,
+    keyword_text: str = "",
+    place_type: str = "",
+):
     url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
     params = {
         "location": f"{lat},{lng}",
         "radius": radius,
-        "keyword": keyword_text,
         "key": MAPS_API_KEY,
         "language": "ja",
     }
+    if keyword_text:
+        params["keyword"] = keyword_text
+    if place_type:
+        params["type"] = place_type
+
     r = requests.get(url, params=params, timeout=20)
-    r.raise_for_status()
+    if not r.ok:
+        raise RuntimeError(f"Places Nearby Search HTTPエラー: {r.status_code}")
     data = r.json()
 
     status = data.get("status")
@@ -94,25 +177,6 @@ def places_nearby(lat: float, lng: float, radius: int, keyword_text: str):
         raise RuntimeError(f"Places Nearby Search失敗: status={status} / message={data.get('error_message','')}")
 
     return data.get("results", [])
-
-
-def place_details(place_id: str):
-    url = "https://maps.googleapis.com/maps/api/place/details/json"
-    params = {
-        "place_id": place_id,
-        "fields": "name,formatted_address,rating,user_ratings_total,url,geometry",
-        "key": MAPS_API_KEY,
-        "language": "ja",
-    }
-    r = requests.get(url, params=params, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-
-    status = data.get("status")
-    if status != "OK":
-        raise RuntimeError(f"Place Details失敗: status={status} / message={data.get('error_message','')}")
-
-    return data["result"]
 
 
 def haversine_m(lat1, lon1, lat2, lon2):
@@ -124,11 +188,94 @@ def haversine_m(lat1, lon1, lat2, lon2):
     return 2 * R * math.asin(math.sqrt(a))
 
 
+def normalize_nearby_place(item: dict, center_lat: float, center_lng: float):
+    place_id = item.get("place_id")
+    location = item.get("geometry", {}).get("location", {})
+    if not place_id or "lat" not in location or "lng" not in location:
+        return None
+
+    name = item.get("name", "")
+    address = item.get("vicinity", "")
+    distance_m = int(
+        haversine_m(
+            center_lat,
+            center_lng,
+            location["lat"],
+            location["lng"],
+        )
+    )
+    map_query = urllib.parse.quote(f"{name} {address}".strip())
+    maps_url = (
+        "https://www.google.com/maps/search/?api=1"
+        f"&query={map_query}&query_place_id={urllib.parse.quote(place_id)}"
+    )
+    return {
+        "place_id": place_id,
+        "name": name,
+        "address": address,
+        "rating": item.get("rating"),
+        "user_ratings_total": item.get("user_ratings_total"),
+        "maps_url": maps_url,
+        "distance_m": distance_m,
+    }
+
+
+def search_environment(lat: float, lng: float, radius: int):
+    results = {}
+    errors = []
+
+    def fetch_category(category):
+        raw_places = places_nearby(
+            lat,
+            lng,
+            radius,
+            keyword_text=category["keyword"],
+            place_type=category["place_type"],
+        )
+        places = [
+            normalized
+            for item in raw_places
+            if (normalized := normalize_nearby_place(item, lat, lng))
+        ]
+        places.sort(key=lambda place: place["distance_m"])
+        return places
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(fetch_category, category): category
+            for category in ENVIRONMENT_CATEGORIES
+        }
+        for future in as_completed(futures):
+            category = futures[future]
+            try:
+                results[category["label"]] = future.result()
+            except Exception as exc:  # pylint: disable=broad-except
+                results[category["label"]] = []
+                errors.append(f"{category['label']}: {exc}")
+    return results, errors
+
+
 # =========================
 # Helpers (Gemini)
 # =========================
+def generate_json(prompt: str, schema: dict):
+    interaction = gemini_client.interactions.create(
+        model=GEMINI_MODEL,
+        input=prompt,
+        generation_config={"thinking_level": "low"},
+        response_format={
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": schema,
+        },
+        timeout=GEMINI_TIMEOUT_SECONDS,
+    )
+    if not interaction.output_text:
+        raise RuntimeError("Geminiから応答が返りませんでした。")
+    return json.loads(interaction.output_text)
+
+
 def ai_extract_search_params(user_text: str, ui_priority: str, ui_radius_label: str):
-    model = genai.GenerativeModel(GEMINI_MODEL)
     prompt = f"""
 あなたは検索クエリ分解器です。
 ユーザーの自由記述から「検索中心（Geocodingに投げられる地名・駅名・施設名）」と
@@ -158,14 +305,10 @@ def ai_extract_search_params(user_text: str, ui_priority: str, ui_radius_label: 
 ユーザー入力：
 {user_text}
 """
-    resp = model.generate_content(prompt)
-    text = resp.text.replace("```json", "").replace("```", "").strip()
-    return json.loads(text)
+    return generate_json(prompt, SEARCH_PARAMS_SCHEMA)
 
 
 def ai_enrich_shops(shops, user_text, extracted, center_label, priority_label, radius_label_str):
-    model = genai.GenerativeModel(GEMINI_MODEL)
-
     candidates = [
         {
             "place_id": s["place_id"],
@@ -212,10 +355,7 @@ constraints={json.dumps(extracted.get("constraints", {}), ensure_ascii=False)}
 候補店舗リスト：
 {json.dumps(candidates, ensure_ascii=False)}
 """
-    resp = model.generate_content(prompt)
-    text = resp.text.replace("```json", "").replace("```", "").strip()
-
-    data = json.loads(text)
+    data = generate_json(prompt, SHOP_ENRICHMENT_SCHEMA)
     enrich_map = {x.get("place_id"): x for x in data.get("shops", [])}
 
     out = []
@@ -232,6 +372,83 @@ constraints={json.dumps(extracted.get("constraints", {}), ensure_ascii=False)}
 # =========================
 # Main
 # =========================
+if feature == "引っ越し周辺環境チェック":
+    if st.button("周辺環境を調べる", type="primary") and residence_name:
+        try:
+            with st.spinner("マンションの位置を確認中..."):
+                geo = geocode_address(residence_name)
+
+            if geo:
+                lat, lng, center_label = geo
+                st.success(f"検索地点: {center_label}（半径 {environment_radius_label}）")
+
+                with st.spinner("駅・買い物・医療などを調査中..."):
+                    environment, environment_errors = search_environment(
+                        lat,
+                        lng,
+                        environment_radius_m,
+                    )
+
+                metric_columns = st.columns(4)
+                for index, category in enumerate(ENVIRONMENT_CATEGORIES):
+                    places = environment[category["label"]]
+                    nearest = f"{places[0]['distance_m']}m" if places else "なし"
+                    with metric_columns[index % 4]:
+                        st.metric(
+                            f"{category['icon']} {category['label']}",
+                            nearest,
+                            f"取得 {len(places)}件",
+                        )
+
+                for category in ENVIRONMENT_CATEGORIES:
+                    places = environment[category["label"]]
+                    nearest_text = (
+                        f"最寄り {places[0]['distance_m']}m"
+                        if places
+                        else "見つかりませんでした"
+                    )
+                    with st.expander(
+                        f"{category['icon']} {category['label']} — {nearest_text}"
+                    ):
+                        if not places:
+                            st.write("指定半径内では取得できませんでした。")
+                            continue
+
+                        for rank, place in enumerate(places[:5], start=1):
+                            rating = (
+                                f"・評価 {place['rating']}"
+                                if place.get("rating") is not None
+                                else ""
+                            )
+                            st.write(
+                                f"**{rank}. {place['name']}** — "
+                                f"{place['distance_m']}m{rating}"
+                            )
+                            if place["address"]:
+                                st.caption(place["address"])
+                            st.markdown(f"[Googleマップで開く]({place['maps_url']})")
+
+                if environment_errors:
+                    st.warning(
+                        "一部カテゴリを取得できませんでした: "
+                        + " / ".join(environment_errors)
+                    )
+
+                st.info(
+                    "災害リスク・犯罪統計・騒音・学区はGoogle Placesだけでは判定できません。"
+                    "自治体のハザードマップや警察統計もあわせて確認してください。"
+                )
+        except Exception as exc:  # pylint: disable=broad-except
+            st.error(f"周辺環境の取得に失敗しました: {exc}")
+    elif not residence_name:
+        st.caption("マンション名を入力して検索してください。")
+
+    st.stop()
+
+if gemini_client is None:
+    st.error("お店検索にはSecretsの 'GEMINI_API_KEY' が必要です。")
+    st.stop()
+
 if st.button("検索") and q:
     try:
         with st.spinner("入力内容を解析中..."):
@@ -269,23 +486,10 @@ if st.button("検索") and q:
 
         shops = []
         for item in raw[:10]:  # 取りすぎ防止（費用/速度対策）
-            pid = item.get("place_id")
-            if not pid:
+            normalized = normalize_nearby_place(item, lat, lng)
+            if not normalized:
                 continue
-
-            d = place_details(pid)
-            gloc = d["geometry"]["location"]
-            dist = haversine_m(lat, lng, gloc["lat"], gloc["lng"])
-
-            shops.append({
-                "place_id": pid,
-                "name": d.get("name", ""),
-                "address": d.get("formatted_address", ""),
-                "rating": d.get("rating", None),
-                "user_ratings_total": d.get("user_ratings_total", None),
-                "maps_url": d.get("url", ""),
-                "distance_m": int(dist),
-            })
+            shops.append(normalized)
 
         if not shops:
             st.warning("店舗情報の取得に失敗しました。別のキーワードでお試しください。")
