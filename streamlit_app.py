@@ -284,7 +284,7 @@ def render_results_map(
             "lat": center_lat,
             "lon": center_lng,
             "color": [234, 67, 53, 230],
-            "radius": 55,
+            "radius": 65,
         }
     ]
     for place in places:
@@ -301,24 +301,27 @@ def render_results_map(
                 "lat": place["lat"],
                 "lon": place["lon"],
                 "color": [66, 133, 244, 210],
-                "radius": 35,
+                "radius": 45,
             }
         )
 
     zoom = 15 if radius_m <= 500 else 14 if radius_m <= 1000 else 13
     layer = pdk.Layer(
         "ScatterplotLayer",
+        id="search-result-points",
         data=points,
         get_position="[lon, lat]",
         get_fill_color="color",
         get_radius="radius",
         radius_units="meters",
-        radius_min_pixels=5,
-        radius_max_pixels=13,
+        radius_min_pixels=10,
+        radius_max_pixels=20,
         pickable=True,
+        auto_highlight=True,
+        highlight_color=[251, 188, 4, 255],
     )
     deck = pdk.Deck(
-        map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        map_style=None,
         initial_view_state=pdk.ViewState(
             latitude=center_lat,
             longitude=center_lng,
@@ -327,14 +330,19 @@ def render_results_map(
         ),
         layers=[layer],
         tooltip={
-            "html": "<b>{name}</b><br>{category}<br>{distance_text}",
+            "text": "{name}\n{category}\n{distance_text}",
             "style": {"backgroundColor": "#202124", "color": "white"},
         },
     )
 
     st.subheader("周辺マップ")
-    st.pydeck_chart(deck, width="stretch")
-    st.caption("🔴 検索地点　🔵 周辺施設（ピンにカーソルを合わせると詳細を表示）")
+    st.pydeck_chart(
+        deck,
+        width="stretch",
+        height=520,
+        alt="検索地点と周辺施設の位置を示す地図",
+    )
+    st.caption("🔴 検索地点　🔵 周辺施設（ピンが黄色になったときに詳細を表示）")
     st.caption("徒歩時間は直線距離を80m/分で換算した目安です。実際の所要時間は徒歩ルートで確認できます。")
 
 
