@@ -3,7 +3,6 @@ import json
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import pydeck as pdk
 import requests
 import streamlit as st
 from google import genai
@@ -283,8 +282,7 @@ def render_results_map(
             "distance_text": "開始地点",
             "lat": center_lat,
             "lon": center_lng,
-            "color": [234, 67, 53, 230],
-            "radius": 65,
+            "is_center": True,
         }
     ]
     for place in places:
@@ -300,49 +298,108 @@ def render_results_map(
                 ),
                 "lat": place["lat"],
                 "lon": place["lon"],
-                "color": [66, 133, 244, 210],
-                "radius": 45,
+                "is_center": False,
             }
         )
 
     zoom = 15 if radius_m <= 500 else 14 if radius_m <= 1000 else 13
-    layer = pdk.Layer(
-        "ScatterplotLayer",
-        id="search-result-points",
-        data=points,
-        get_position="[lon, lat]",
-        get_fill_color="color",
-        get_radius="radius",
-        radius_units="meters",
-        radius_min_pixels=10,
-        radius_max_pixels=20,
-        pickable=True,
-        auto_highlight=True,
-        highlight_color=[251, 188, 4, 255],
-    )
-    deck = pdk.Deck(
-        map_style=None,
-        initial_view_state=pdk.ViewState(
-            latitude=center_lat,
-            longitude=center_lng,
-            zoom=zoom,
-            pitch=0,
-        ),
-        layers=[layer],
-        tooltip={
-            "text": "{name}\n{category}\n{distance_text}",
-            "style": {"backgroundColor": "#202124", "color": "white"},
-        },
+    points_json = json.dumps(points, ensure_ascii=False).replace("</", "<\\/")
+    map_html = """
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  >
+  <style>
+    html, body, #map { width: 100%; height: 100%; margin: 0; }
+    .leaflet-tooltip {
+      border: 0;
+      border-radius: 8px;
+      background: #202124;
+      color: #fff;
+      box-shadow: 0 3px 12px rgba(0, 0, 0, .28);
+      font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      padding: 8px 10px;
+    }
+    .leaflet-tooltip-top::before { border-top-color: #202124; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const points = __POINTS_JSON__;
+    const center = [__CENTER_LAT__, __CENTER_LNG__];
+    const initialZoom = __ZOOM__;
+    const map = L.map("map", { scrollWheelZoom: true }).setView(center, initialZoom);
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }).addTo(map);
+
+    const escapeHtml = (value) => String(value ?? "").replace(
+      /[&<>"']/g,
+      (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;"
+      })[char]
+    );
+    const detailHtml = (point) =>
+      `<strong>${escapeHtml(point.name)}</strong><br>` +
+      `${escapeHtml(point.category)}<br>` +
+      `${escapeHtml(point.distance_text)}`;
+
+    const markers = points.map((point) => {
+      const color = point.is_center ? "#ea4335" : "#4285f4";
+      const marker = L.circleMarker([point.lat, point.lon], {
+        radius: point.is_center ? 10 : 8,
+        color: "#ffffff",
+        weight: 2,
+        fillColor: color,
+        fillOpacity: .92
+      })
+        .bindTooltip(detailHtml(point), {
+          sticky: true,
+          direction: "top",
+          opacity: .98
+        })
+        .bindPopup(detailHtml(point))
+        .addTo(map);
+      return marker;
+    });
+
+    if (markers.length > 1) {
+      const bounds = L.featureGroup(markers).getBounds();
+      map.fitBounds(bounds.pad(.12), { maxZoom: initialZoom });
+    }
+  </script>
+</body>
+</html>
+"""
+    map_html = (
+        map_html.replace("__POINTS_JSON__", points_json)
+        .replace("__CENTER_LAT__", repr(center_lat))
+        .replace("__CENTER_LNG__", repr(center_lng))
+        .replace("__ZOOM__", str(zoom))
     )
 
     st.subheader("周辺マップ")
-    st.pydeck_chart(
-        deck,
+    st.iframe(
+        map_html,
         width="stretch",
         height=520,
+        tab_index=0,
         alt="検索地点と周辺施設の位置を示す地図",
     )
-    st.caption("🔴 検索地点　🔵 周辺施設（ピンが黄色になったときに詳細を表示）")
+    st.caption("🔴 検索地点　🔵 周辺施設（カーソルまたはクリックで詳細を表示）")
     st.caption("徒歩時間は直線距離を80m/分で換算した目安です。実際の所要時間は徒歩ルートで確認できます。")
 
 
