@@ -3,6 +3,7 @@ import json
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import pydeck as pdk
 import requests
 import streamlit as st
 from google import genai
@@ -204,6 +205,7 @@ def normalize_nearby_place(item: dict, center_lat: float, center_lng: float):
             location["lng"],
         )
     )
+    walking_minutes = max(1, math.ceil(distance_m / 80))
     map_query = urllib.parse.quote(f"{name} {address}".strip())
     maps_url = (
         "https://www.google.com/maps/search/?api=1"
@@ -221,11 +223,14 @@ def normalize_nearby_place(item: dict, center_lat: float, center_lng: float):
         "place_id": place_id,
         "name": name,
         "address": address,
+        "lat": location["lat"],
+        "lon": location["lng"],
         "rating": item.get("rating"),
         "user_ratings_total": item.get("user_ratings_total"),
         "maps_url": maps_url,
         "directions_url": directions_url,
         "distance_m": distance_m,
+        "walking_minutes": walking_minutes,
     }
 
 
@@ -262,6 +267,75 @@ def search_environment(lat: float, lng: float, radius: int):
                 results[category["label"]] = []
                 errors.append(f"{category['label']}: {exc}")
     return results, errors
+
+
+def render_results_map(
+    center_lat: float,
+    center_lng: float,
+    center_label: str,
+    places: list[dict],
+    radius_m: int,
+):
+    points = [
+        {
+            "name": center_label,
+            "category": "検索地点",
+            "distance_text": "開始地点",
+            "lat": center_lat,
+            "lon": center_lng,
+            "color": [234, 67, 53, 230],
+            "radius": 55,
+        }
+    ]
+    for place in places:
+        if "lat" not in place or "lon" not in place:
+            continue
+        points.append(
+            {
+                "name": place["name"],
+                "category": place.get("category", "周辺施設"),
+                "distance_text": (
+                    f"検索地点から {place['distance_m']}m"
+                    f"・徒歩約{place['walking_minutes']}分"
+                ),
+                "lat": place["lat"],
+                "lon": place["lon"],
+                "color": [66, 133, 244, 210],
+                "radius": 35,
+            }
+        )
+
+    zoom = 15 if radius_m <= 500 else 14 if radius_m <= 1000 else 13
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=points,
+        get_position="[lon, lat]",
+        get_fill_color="color",
+        get_radius="radius",
+        radius_units="meters",
+        radius_min_pixels=5,
+        radius_max_pixels=13,
+        pickable=True,
+    )
+    deck = pdk.Deck(
+        map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        initial_view_state=pdk.ViewState(
+            latitude=center_lat,
+            longitude=center_lng,
+            zoom=zoom,
+            pitch=0,
+        ),
+        layers=[layer],
+        tooltip={
+            "html": "<b>{name}</b><br>{category}<br>{distance_text}",
+            "style": {"backgroundColor": "#202124", "color": "white"},
+        },
+    )
+
+    st.subheader("周辺マップ")
+    st.pydeck_chart(deck, width="stretch")
+    st.caption("🔴 検索地点　🔵 周辺施設（ピンにカーソルを合わせると詳細を表示）")
+    st.caption("徒歩時間は直線距離を80m/分で換算した目安です。実際の所要時間は徒歩ルートで確認できます。")
 
 
 # =========================
@@ -398,21 +472,50 @@ if feature == "引っ越し周辺環境チェック":
                         environment_radius_m,
                     )
 
+                map_places = []
+                for category in ENVIRONMENT_CATEGORIES:
+                    for place in environment[category["label"]]:
+                        map_places.append(
+                            {
+                                **place,
+                                "category": (
+                                    f"{category['icon']} {category['label']}"
+                                ),
+                            }
+                        )
+                render_results_map(
+                    lat,
+                    lng,
+                    center_label,
+                    map_places,
+                    environment_radius_m,
+                )
+
                 metric_columns = st.columns(4)
                 for index, category in enumerate(ENVIRONMENT_CATEGORIES):
                     places = environment[category["label"]]
-                    nearest = f"{places[0]['distance_m']}m" if places else "なし"
+                    nearest = (
+                        f"徒歩約{places[0]['walking_minutes']}分"
+                        if places
+                        else "なし"
+                    )
+                    distance_and_count = (
+                        f"{places[0]['distance_m']}m・取得 {len(places)}件"
+                        if places
+                        else "取得 0件"
+                    )
                     with metric_columns[index % 4]:
                         st.metric(
                             f"{category['icon']} {category['label']}",
                             nearest,
-                            f"取得 {len(places)}件",
+                            distance_and_count,
                         )
 
                 for category in ENVIRONMENT_CATEGORIES:
                     places = environment[category["label"]]
                     nearest_text = (
                         f"最寄り {places[0]['distance_m']}m"
+                        f"・徒歩約{places[0]['walking_minutes']}分"
                         if places
                         else "見つかりませんでした"
                     )
@@ -431,7 +534,9 @@ if feature == "引っ越し周辺環境チェック":
                             )
                             st.write(
                                 f"**{rank}. {place['name']}** — "
-                                f"{place['distance_m']}m{rating}"
+                                f"{place['distance_m']}m"
+                                f"・徒歩約{place['walking_minutes']}分"
+                                f"{rating}"
                             )
                             if place["address"]:
                                 st.caption(place["address"])
@@ -513,6 +618,13 @@ if st.button("検索") and q:
             shops.sort(key=lambda x: (-(x["rating"] or -1), x["distance_m"]))
 
         shops = shops[:5]
+        render_results_map(
+            lat,
+            lng,
+            center_label,
+            shops,
+            radius_m,
+        )
 
         with st.spinner("AIが理由・口コミ傾向を生成中..."):
             shops = ai_enrich_shops(
@@ -527,7 +639,10 @@ if st.button("検索") and q:
         for s in shops:
             rating = s.get("rating")
             rating_text = f"{rating} / 5" if rating is not None else "評価なし"
-            sub = f"⭐ {rating_text}・🧭 {s['distance_m']}m"
+            sub = (
+                f"⭐ {rating_text}・🧭 {s['distance_m']}m"
+                f"・🚶 徒歩約{s['walking_minutes']}分"
+            )
 
             with st.expander(f"🏢 {s['name']}（{sub}）"):
                 st.write("📍 **住所**")
